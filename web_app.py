@@ -9,6 +9,8 @@ import atexit
 import re
 from functools import wraps
 import signal
+import secrets
+from werkzeug.security import generate_password_hash, check_password_hash
 from utils import generate_transfer_notification
 from notify import send as notify_send
 from datetime import datetime
@@ -41,12 +43,20 @@ log_level = "DEBUG"  # 使用DEBUG级别，可以看到所有日志
 
 # 过滤敏感信息
 def filter_sensitive_info(record):
-    """过滤敏感信息，如BDUSS和cookies"""
+    """过滤日志中的敏感信息，如 BDUSS、cookies、提取码、密码与各类 token"""
     message = record["message"]
     # 替换BDUSS
     message = re.sub(r"BDUSS['\"]?\s*:\s*['\"]?([^'\"]+)['\"]?", "BDUSS: [已隐藏]", message)
     # 替换cookies
     message = re.sub(r"cookies['\"]?\s*:\s*['\"]?([^'\"]+)['\"]?", "cookies: [已隐藏]", message)
+    # 替换提取码 / 密码（中文标签形式，如「提取码: 1234」「使用密码 1234」）
+    message = re.sub(r"(提取码|密码)\s*[:：]?\s*\S+", r"\1: [已隐藏]", message)
+    # 替换 password / pwd / token / secret 等键值对形式
+    message = re.sub(
+        r"(?i)\b(password|passwd|pwd|token|secret|apikey|api_key)\b\s*['\"]?\s*[:=]\s*['\"]?([^\s'\",}]+)",
+        r"\1: [已隐藏]",
+        message,
+    )
     record["message"] = message
     return True
 
@@ -78,8 +88,39 @@ logger.add("log/web_app_{time:YYYY-MM-DD}.log",
           encoding="utf-8",
           format=log_format)
 
+def _load_or_create_secret_key():
+    """获取用于 session 签名的密钥。
+
+    优先使用环境变量 SECRET_KEY；未配置时在本地生成并持久化随机密钥，
+    既避免每次重启导致会话失效，又杜绝硬编码弱密钥带来的伪造风险。
+    """
+    env_secret = os.environ.get('SECRET_KEY')
+    if env_secret:
+        return env_secret
+
+    key_path = os.path.join('config', '.secret_key')
+    try:
+        if os.path.exists(key_path):
+            with open(key_path, 'r', encoding='utf-8') as f:
+                existing = f.read().strip()
+                if existing:
+                    return existing
+        key = secrets.token_hex(32)
+        os.makedirs('config', exist_ok=True)
+        with open(key_path, 'w', encoding='utf-8') as f:
+            f.write(key)
+        try:
+            os.chmod(key_path, 0o600)  # 尽量收紧文件权限（部分系统可能不支持）
+        except OSError:
+            pass
+        return key
+    except Exception as e:
+        logger.warning(f"生成/读取密钥文件失败，回退到临时随机密钥: {str(e)}")
+        return secrets.token_hex(32)
+
+
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'  # 用于session加密
+app.secret_key = _load_or_create_secret_key()  # 用于session加密（环境变量或本地随机密钥）
 CORS(app)
 
 # 全局变量声明
@@ -286,6 +327,43 @@ def handle_api_error(f):
             return jsonify({'success': False, 'message': error_msg})
     return decorated_function
 
+def _check_password(stored_password, password):
+    """校验密码，兼容哈希与历史的明文存储。
+
+    返回 (是否通过, 是否为明文存储) 元组，便于明文校验通过后自动升级为哈希。
+    """
+    if stored_password is None:
+        return False, False
+    # werkzeug 生成的哈希形如 pbkdf2:sha256:...$salt$hash / scrypt:...$salt$hash
+    if isinstance(stored_password, str) and '$' in stored_password and ':' in stored_password:
+        try:
+            return check_password_hash(stored_password, password), False
+        except Exception:
+            return False, False
+    # 历史明文口令
+    return (password == stored_password), True
+
+
+def _verify_auth(auth_config, username, password):
+    """校验登录账号口令；若配置中仍是明文，校验通过后自动升级为哈希存储。"""
+    if username != auth_config.get('users'):
+        return False
+
+    passed, is_plain = _check_password(auth_config.get('password'), password)
+    if not passed:
+        return False
+
+    # 明文口令首次校验通过后升级为哈希，避免明文落盘
+    if is_plain:
+        try:
+            auth_config['password'] = generate_password_hash(password)
+            storage._save_config(update_scheduler=False)
+            logger.info("登录口令已升级为哈希存储")
+        except Exception as e:
+            logger.warning(f"升级登录口令为哈希失败: {str(e)}")
+    return True
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """登录处理"""
@@ -299,8 +377,7 @@ def login():
             
         # 验证用户名和密码
         auth_config = storage.config.get('auth', {})
-        if (username == auth_config.get('users') and 
-            password == auth_config.get('password')):
+        if _verify_auth(auth_config, username, password):
             session['username'] = username
             session['login_time'] = time.time()
             
@@ -693,6 +770,10 @@ def execute_task():
     # 立即返回响应，然后异步执行任务
     def execute_task_async():
         """异步执行任务"""
+        # 与调度器共用同一把执行锁，避免手动执行与定时任务并发操作同一网盘账号
+        exec_lock = getattr(scheduler, '_execution_lock', None) if scheduler else None
+        if exec_lock is not None:
+            exec_lock.acquire()
         try:
             _append_task_log(task_order, '任务线程已启动，正在准备执行...', task_uid=task_uid)
             
@@ -795,6 +876,10 @@ def execute_task():
             _publish_task_status(task_order, task_uid)
             _append_task_log(task_order, f'任务执行异常: {parsed_error}', level='ERROR', task_uid=task_uid)
             _publish_task_completed(task_order, task_uid)
+        finally:
+            # 释放与调度器共用的执行锁
+            if exec_lock is not None:
+                exec_lock.release()
 
     # 启动异步任务并立即返回
     thread = threading.Thread(target=execute_task_async)
@@ -1120,7 +1205,8 @@ def update_config():
 
         new_password = incoming_auth.get('password')
         if isinstance(new_password, str) and new_password.strip():
-            merged_auth['password'] = new_password
+            # 新密码以哈希形式存储，避免明文落盘
+            merged_auth['password'] = generate_password_hash(new_password.strip())
         elif 'password' in current_auth:
             merged_auth['password'] = current_auth['password']
 
@@ -1217,9 +1303,26 @@ def test_notify():
         logger.error(f"发送测试通知失败: {str(e)}")
         return jsonify({'success': False, 'message': f'发送测试通知失败: {str(e)}'})
 
+def with_execution_lock(f):
+    """装饰器：为需要独占网盘账号的任务入口加上与调度器共用的执行锁，
+    避免手动批量执行与定时任务并发操作同一账号。"""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        exec_lock = getattr(scheduler, '_execution_lock', None) if scheduler else None
+        if exec_lock is not None:
+            exec_lock.acquire()
+        try:
+            return f(*args, **kwargs)
+        finally:
+            if exec_lock is not None:
+                exec_lock.release()
+    return wrapper
+
+
 @app.route('/api/tasks/execute-all', methods=['POST'])
 @login_required
 @handle_api_error
+@with_execution_lock
 def execute_all_tasks():
     """批量执行任务"""
     if not storage:
@@ -1605,8 +1708,7 @@ def api_login():
         
     # 验证用户名和密码
     auth_config = storage.config.get('auth', {})
-    if (username == auth_config.get('users') and 
-        password == auth_config.get('password')):
+    if _verify_auth(auth_config, username, password):
         session['username'] = username
         session['login_time'] = time.time()
         
@@ -1661,14 +1763,15 @@ def update_auth():
     if not new_username or not new_password or not old_password:
         return jsonify({'success': False, 'message': '用户名、新密码和旧密码都不能为空'})
     
-    # 验证旧密码
+    # 验证旧密码（兼容历史明文存储）
     auth_config = storage.config.get('auth', {})
-    if old_password != auth_config.get('password'):
+    passed, _ = _check_password(auth_config.get('password'), old_password)
+    if not passed:
         return jsonify({'success': False, 'message': '旧密码错误'})
     
-    # 更新配置
+    # 更新配置（新密码以哈希形式保存）
     auth_config['users'] = new_username
-    auth_config['password'] = new_password
+    auth_config['password'] = generate_password_hash(new_password)
     storage.config['auth'] = auth_config
     storage._save_config()
     

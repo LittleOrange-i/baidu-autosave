@@ -72,6 +72,7 @@ def api_retry(max_retries=1, delay_range=(2, 3), exclude_errors=None):
 class BaiduStorage:
     def __init__(self):
         self._client_lock = Lock()  # 添加客户端初始化锁
+        self._config_lock = Lock()  # 配置文件读写锁，避免多线程并发写导致配置损坏
         self.config = self._load_config()
         if self._ensure_task_uids():
             self._save_config(update_scheduler=False)
@@ -174,31 +175,44 @@ class BaiduStorage:
             raise
             
     def _save_config(self, update_scheduler=True):
-        """保存配置到文件"""
+        """保存配置到文件
+
+        采用「加锁 + 临时文件原子替换」的方式写入，避免多线程并发写时
+        出现 config.json 被截断或内容损坏的情况。
+        """
         try:
             # 在保存前清理 None 值的 cron 字段
             for task in self.config.get('baidu', {}).get('tasks', []):
                 if 'cron' in task and task['cron'] is None:
                     del task['cron']
-                    
-            with open('config/config.json', 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, ensure_ascii=False, indent=4)
-            
-            logger.debug("配置保存成功")
-            
-            # 确保配置已经写入文件
-            with open('config/config.json', 'r', encoding='utf-8') as f:
-                saved_config = json.load(f)
-                if saved_config != self.config:
-                    logger.error("配置保存验证失败")
-                    raise Exception("配置保存验证失败")
-            
-            # 通知调度器更新任务
+
+            config_path = 'config/config.json'
+            tmp_path = f'{config_path}.tmp'
+
+            # 加锁：保证同一时刻只有一个线程在写配置文件
+            with self._config_lock:
+                # 先写入临时文件并落盘，再原子替换，避免其它线程读到写入一半的内容
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=4)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, config_path)
+
+                logger.debug("配置保存成功")
+
+                # 确保配置已经写入文件
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    saved_config = json.load(f)
+                    if saved_config != self.config:
+                        logger.error("配置保存验证失败")
+                        raise Exception("配置保存验证失败")
+
+            # 通知调度器更新任务（放到锁外，避免长时间持锁）
             if update_scheduler:
                 from scheduler import TaskScheduler
                 if hasattr(TaskScheduler, 'instance') and TaskScheduler.instance:
                     TaskScheduler.instance.update_tasks()
-            
+
         except Exception as e:
             logger.error(f"保存配置失败: {str(e)}")
             raise
@@ -246,7 +260,18 @@ class BaiduStorage:
             except Exception as e:
                 logger.error(f"初始化客户端失败: {str(e)}")
                 return False
-            
+
+    def refresh_login(self):
+        """重新初始化网盘客户端以刷新登录状态。
+
+        调度器在检测到存储状态异常（is_valid 返回 False）时会调用本方法，
+        重新解析 cookies 并建立客户端连接。
+        Returns:
+            bool: 刷新成功返回 True，否则返回 False
+        """
+        logger.info("正在刷新网盘登录状态...")
+        return bool(self._init_client())
+
     def _validate_cookies(self, cookies):
         """验证cookies是否有效
         Args:

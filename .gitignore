@@ -11,6 +11,11 @@ __pycache__/
 config/config*.json
 git-config
 
+# 敏感凭据与密钥文件（禁止提交）
+cookies.txt
+config/.secret_key
+config/*.tmp
+
 # 日志文件
 log/
 *.log

@@ -192,8 +192,8 @@ export const useTaskStore = defineStore('tasks', () => {
 
   const executeTask = async (taskId: number) => {
     try {
-      // 更新任务状态为运行中
-      const task = tasks.value.find(t => t.order === taskId)
+      // 更新任务状态为运行中（taskId 为前端 0 基索引，order 自 1 起，故需 +1）
+      const task = tasks.value.find(t => t.order === taskId + 1)
       if (task) {
         task.status = TASK_STATUS.RUNNING
         task.message = '正在执行...'
@@ -211,7 +211,7 @@ export const useTaskStore = defineStore('tasks', () => {
       return response
     } catch (err) {
       // 恢复任务状态
-      const task = tasks.value.find(t => t.order === taskId)
+      const task = tasks.value.find(t => t.order === taskId + 1)
       if (task) {
         task.status = TASK_STATUS.ERROR
         task.message = getErrorMessage(err)
@@ -226,7 +226,7 @@ export const useTaskStore = defineStore('tasks', () => {
     try {
       // 更新选中任务状态为运行中
       taskIds.forEach(taskId => {
-        const task = tasks.value.find(t => t.order === taskId)
+        const task = tasks.value.find(t => t.order === taskId + 1)
         if (task) {
           task.status = TASK_STATUS.RUNNING
           task.message = '正在执行...'
@@ -242,7 +242,7 @@ export const useTaskStore = defineStore('tasks', () => {
     } catch (err) {
       // 恢复任务状态
       taskIds.forEach(taskId => {
-        const task = tasks.value.find(t => t.order === taskId)
+        const task = tasks.value.find(t => t.order === taskId + 1)
         if (task) {
           task.status = TASK_STATUS.ERROR
           task.message = getErrorMessage(err)
@@ -276,7 +276,7 @@ export const useTaskStore = defineStore('tasks', () => {
       const response = await apiService.shareTask(taskId, options)
       if (response.success) {
         // 更新任务的分享信息
-        const task = tasks.value.find(t => t.order === taskId)
+        const task = tasks.value.find(t => t.order === taskId + 1)
         if (task) {
           task.share_info = response.share_info || response.data?.share_info
         }
