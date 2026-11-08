@@ -50,6 +50,7 @@ yarn-error.log*
 # 构建输出
 dist/
 build/
+static/
 
 # 临时文件
 *.tmp
