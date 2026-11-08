@@ -11,7 +11,7 @@ const packageJson = JSON.parse(
 ) as { version: string }
 const appVersion = `v${packageJson.version}`
 const buildTime = new Date().toISOString()
-const backendTarget = process.env.VITE_BACKEND_TARGET || 'http://localhost:5000'
+const backendTarget = process.env.VITE_BACKEND_TARGET || 'http://localhost:5656'
 const forwardedProto = (() => {
   try {
     return new URL(backendTarget).protocol.replace(':', '') || 'http'

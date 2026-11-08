@@ -52,6 +52,7 @@ export const ROUTES = {
 export const PAGE_TITLES = {
   LOGIN: '登录',
   DASHBOARD: '仪表盘',
+  SUBSCRIPTIONS: '订阅同步',
   TASKS: '任务管理',
   USERS: '用户管理', 
   SETTINGS: '系统设置',

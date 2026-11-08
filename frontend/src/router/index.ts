@@ -6,6 +6,7 @@ import { PAGE_TITLES } from '@/utils/constants'
 // 路由懒加载
 const LoginView = () => import('@/views/login/LoginView.vue')
 const DashboardView = () => import('@/views/dashboard/DashboardView.vue')
+const SubscriptionsView = () => import('@/views/subscriptions/SubscriptionsView.vue')
 const TasksView = () => import('@/views/tasks/TasksView.vue')
 const UsersView = () => import('@/views/users/UsersView.vue')
 const SettingsView = () => import('@/views/settings/SettingsView.vue')
@@ -33,6 +34,16 @@ const routes = [
       title: PAGE_TITLES.DASHBOARD,
       requiresAuth: true,
       icon: 'Dashboard'
+    }
+  },
+  {
+    path: '/subscriptions',
+    name: 'Subscriptions',
+    component: SubscriptionsView,
+    meta: {
+      title: PAGE_TITLES.SUBSCRIPTIONS,
+      requiresAuth: true,
+      icon: 'Promotion'
     }
   },
   {

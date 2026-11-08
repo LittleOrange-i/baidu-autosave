@@ -1,6 +1,7 @@
 from baidupcs_py.baidupcs import BaiduPCSApi
 from baidupcs_py.baidupcs.errors import BaiduPCSError
 from loguru import logger
+import requests
 import json
 import os
 import time
@@ -1799,6 +1800,291 @@ class BaiduStorage:
         except Exception as e:
             logger.error(f"获取分享信息失败: {str(e)}")
             return {'success': False, 'error': str(e)}
+
+    # ==================== 订阅分享同步 ====================
+    # 「订阅分享管理」会话 ID 形如 03_<自己的uk>_<官方账号uk>
+    SUBSCRIBE_SESSION_TYPE = '03'
+    SUBSCRIBE_OFFICIAL_UK = '1101278772418'
+    IMBOX_PULL_URL = 'https://pan.baidu.com/imbox/msg/pull?clienttype=0&app_id=250528&web=1'
+
+    def _get_current_cookies_str(self):
+        """获取当前登录用户的 cookies 字符串"""
+        baidu = self.config.get('baidu', {}) or {}
+        current_user = baidu.get('current_user')
+        if not current_user:
+            return ''
+        return ((baidu.get('users', {}) or {}).get(current_user, {}) or {}).get('cookies', '') or ''
+
+    def _get_current_uk(self):
+        """获取当前登录用户的网盘 uk。
+
+        每次按「当前账号」的 cookies 实时获取，因此切换账号后会自动适配。
+        注意：网盘 uk 与 user_id（baidu uid）不是同一个值，订阅会话 ID 必须用 uk。
+        """
+        cookies_str = self._get_current_cookies_str()
+        if not cookies_str:
+            return ''
+
+        headers = {
+            'Cookie': cookies_str,
+            'Referer': 'https://pan.baidu.com/disk/main',
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                           '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+        }
+        try:
+            resp = requests.get(
+                'https://pan.baidu.com/api/gettemplatevariable',
+                params={'clienttype': 0, 'app_id': 250528, 'web': 1, 'fields': '["uk"]'},
+                headers=headers,
+                timeout=15,
+            )
+            data = resp.json()
+            uk = (data.get('result') or {}).get('uk') or data.get('uk')
+            if uk:
+                logger.info(f"[订阅同步] 当前账号网盘 uk: {uk}")
+                return str(uk)
+            logger.error(f"[订阅同步] 获取网盘 uk 失败: {data}")
+        except Exception as e:
+            logger.error(f"[订阅同步] 获取网盘 uk 异常: {str(e)}")
+        return ''
+
+    def resolve_subscribe_session_id(self):
+        """解析「订阅分享管理」会话 ID。
+
+        优先用当前账号的 uk 自动拼装，切换账号后会自动适配；
+        仅当自动识别失败时，才回退到用户手动填写的会话 ID。
+        """
+        conf = self.config.get('subscription', {}) or {}
+        official_uk = str(conf.get('official_uk') or self.SUBSCRIBE_OFFICIAL_UK).strip()
+
+        uk = self._get_current_uk()
+        if uk:
+            return f"{self.SUBSCRIBE_SESSION_TYPE}_{uk}_{official_uk}"
+
+        # 自动识别失败，回退到手动配置的会话 ID
+        return str(conf.get('session_id') or '').strip()
+
+    @staticmethod
+    def _extract_subscribe_name(desc, file_list):
+        """从订阅消息描述中提取订阅名称（形如「名称-来自xxx」）"""
+        match = re.search(r'「([^」]+)」', desc or '')
+        if match:
+            name = match.group(1).split('-来自')[0].strip()
+            if name:
+                return name
+        # 退化方案：用第一个文件的父目录名
+        if file_list:
+            path = (file_list[0] or {}).get('path') or ''
+            parts = [seg for seg in path.split('/') if seg]
+            if len(parts) >= 2:
+                return parts[-2]
+        return '未命名订阅'
+
+    @staticmethod
+    def _extract_surl(url):
+        """从分享链接中提取 surl（分享唯一标识），用于去重"""
+        match = re.search(r'/s/([A-Za-z0-9_-]+)', url or '')
+        return match.group(1) if match else ''
+
+    def fetch_subscription_shares(self, max_pages=10, session_id=None, progress_callback=None):
+        """拉取「订阅分享管理」中的全部订阅分享。
+
+        通过 imbox/msg/pull 接口分页拉取（showlink=true 让接口返回 share_url），
+        解析出每条订阅的名称、分享链接（含提取码）与更新文件列表。
+
+        Args:
+            max_pages: 最大翻页次数，避免异常时死循环
+            session_id: 指定会话 ID，默认自动解析
+            progress_callback: 可选进度回调 callable(message)
+        Returns:
+            dict: {success, items, error, pages, raw_total}
+        """
+        def _log(message):
+            logger.info(f"[订阅同步] {message}")
+            if progress_callback:
+                try:
+                    progress_callback(message)
+                except Exception:
+                    pass
+
+        session_id = session_id or self.resolve_subscribe_session_id()
+        if not session_id:
+            return {'success': False, 'items': [], 'error': '未获取到订阅会话 ID，请在「订阅同步」中配置', 'pages': 0, 'raw_total': 0}
+
+        cookies_str = self._get_current_cookies_str()
+        if not cookies_str:
+            return {'success': False, 'items': [], 'error': '当前用户 cookies 为空，请先登录百度账号', 'pages': 0, 'raw_total': 0}
+
+        _log(f'使用会话 ID: {session_id}')
+
+        headers = {
+            'Cookie': cookies_str,
+            'Referer': 'https://pan.baidu.com/disk/main',
+            'Origin': 'https://pan.baidu.com',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json, text/plain, */*',
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                           '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+        }
+
+        items = []
+        seen_msgids = set()
+        scursor = int(time.time() * 1000)  # 以当前时间为起点往前翻
+        ecursor = 0
+        pages = 0
+        raw_total = 0
+
+        try:
+            while pages < max_pages:
+                pages += 1
+                data = {
+                    'pulltype': 1,
+                    'sids': json.dumps([session_id]),
+                    'needprofile': 1,
+                    'identity': 0,
+                    'new_share_notice': 1,
+                    'showlink': 'true',
+                    'cursors': json.dumps({session_id: {'scursor': scursor, 'ecursor': ecursor}}),
+                    'showtransfer': 0,
+                }
+                _log(f'请求第 {pages} 页 (scursor={scursor}, ecursor={ecursor})')
+                # dp-logid 为百度埋点用的请求标识，带上更贴近真实浏览器请求
+                dp_logid = f"{int(time.time() * 1000)}{random.randint(1000, 9999)}"
+                request_url = f'{self.IMBOX_PULL_URL}&dp-logid={dp_logid}'
+                resp = requests.post(request_url, headers=headers, data=data, timeout=20)
+                if resp.status_code != 200:
+                    return {'success': False, 'items': items, 'error': f'订阅接口 HTTP {resp.status_code}',
+                            'pages': pages, 'raw_total': raw_total}
+
+                try:
+                    payload = resp.json()
+                except Exception:
+                    return {'success': False, 'items': items, 'error': '订阅接口返回非 JSON（可能已失效或需重新登录）',
+                            'pages': pages, 'raw_total': raw_total}
+
+                errno = payload.get('errno', -1)
+                if errno != 0:
+                    detail = payload.get('show_msg') or payload.get('errmsg') or payload.get('error_msg') or ''
+                    hint = detail or ('登录状态可能已失效，请重新登录百度账号后重试' if errno in (-6, 1) else '')
+                    return {'success': False, 'items': items,
+                            'error': f'订阅接口返回错误 errno={errno}' + (f'（{hint}）' if hint else ''),
+                            'pages': pages, 'raw_total': raw_total}
+
+                has_more = False
+                page_min_cursor = None
+                page_new = 0
+
+                for session in (payload.get('sessions') or []):
+                    if session.get('has_more'):
+                        has_more = True
+                    for record in (session.get('msgrecord') or []):
+                        raw_total += 1
+                        cursor = record.get('cursor') or 0
+                        if page_min_cursor is None or (cursor and cursor < page_min_cursor):
+                            page_min_cursor = cursor
+
+                        msgid = str(record.get('msgid') or '')
+                        if msgid and msgid in seen_msgids:
+                            continue
+                        if msgid:
+                            seen_msgids.add(msgid)
+
+                        rich = record.get('rich_text') or {}
+                        share_url = (rich.get('share_url') or '').strip()
+                        if not share_url:
+                            continue
+
+                        file_list = record.get('file_list') or []
+                        items.append({
+                            'msgid': msgid,
+                            'cursor': cursor,
+                            'name': self._extract_subscribe_name(rich.get('desc'), file_list),
+                            'share_url': share_url,
+                            'desc': rich.get('desc') or '',
+                            'notice_time': rich.get('notice_time') or cursor or 0,
+                            'files': [f.get('path') for f in file_list if f.get('path')],
+                        })
+                        page_new += 1
+
+                _log(f'第 {pages} 页新增 {page_new} 条订阅，累计 {len(items)} 条')
+
+                # 没有更多、拿不到游标、或本页无新数据时结束
+                if not has_more or not page_min_cursor or page_new == 0:
+                    break
+                scursor = page_min_cursor
+                ecursor = 0
+
+            return {'success': True, 'items': items, 'error': '', 'pages': pages, 'raw_total': raw_total}
+
+        except Exception as e:
+            logger.error(f"拉取订阅分享失败: {str(e)}")
+            return {'success': False, 'items': items, 'error': str(e), 'pages': pages, 'raw_total': raw_total}
+
+    def sync_subscription_tasks(self, save_dir_prefix=None, dry_run=False, progress_callback=None):
+        """把订阅分享同步为转存任务（已存在的分享链接自动跳过）。
+
+        Args:
+            save_dir_prefix: 保存目录前缀，默认取配置 subscription.save_dir_prefix
+            dry_run: 仅预览不落库
+            progress_callback: 进度回调
+        Returns:
+            dict: {success, added, skipped, failed, items, error}
+        """
+        conf = self.config.get('subscription', {}) or {}
+        prefix = (save_dir_prefix or conf.get('save_dir_prefix') or '/订阅').rstrip('/')
+
+        fetch_result = self.fetch_subscription_shares(progress_callback=progress_callback)
+        if not fetch_result['success']:
+            return {'success': False, 'added': 0, 'skipped': 0, 'failed': 0,
+                    'items': [], 'error': fetch_result.get('error', '拉取订阅失败')}
+
+        # 已存在的分享 surl 集合，用于去重
+        existing_surls = {self._extract_surl(t.get('url', '')) for t in self.list_tasks()}
+        existing_surls.discard('')
+
+        added, skipped, failed = 0, 0, 0
+        results = []
+
+        for item in fetch_result['items']:
+            share_url = item['share_url']
+            name = item['name'] or '未命名订阅'
+            surl = self._extract_surl(share_url)
+
+            if surl and surl in existing_surls:
+                skipped += 1
+                results.append({'name': name, 'url': share_url, 'status': 'skipped'})
+                continue
+
+            # 拆出提取码
+            url, pwd = share_url, ''
+            if '?pwd=' in url:
+                url, pwd = url.split('?pwd=', 1)
+                pwd = pwd.strip()
+
+            if dry_run:
+                added += 1
+                results.append({'name': name, 'url': share_url, 'status': 'new'})
+                continue
+
+            try:
+                ok = self.add_task(url.strip(), f"{prefix}/{name}", pwd, name)
+                if ok:
+                    added += 1
+                    if surl:
+                        existing_surls.add(surl)
+                    results.append({'name': name, 'url': share_url, 'status': 'added'})
+                else:
+                    failed += 1
+                    results.append({'name': name, 'url': share_url, 'status': 'failed'})
+            except Exception as e:
+                failed += 1
+                logger.error(f"订阅同步添加任务失败: {name} - {str(e)}")
+                results.append({'name': name, 'url': share_url, 'status': 'failed', 'error': str(e)})
+
+        return {'success': True, 'added': added, 'skipped': skipped, 'failed': failed,
+                'items': results, 'error': ''}
 
     def _wait_for_rate_limit(self):
         """等待请求限制"""

@@ -53,6 +53,16 @@ interface QuotaAlertConfig {
   check_schedule?: string
 }
 
+interface SubscriptionConfig {
+  enabled?: boolean
+  auto_sync?: boolean
+  schedule?: string
+  session_id?: string
+  save_dir_prefix?: string
+  max_pages?: number
+  alert_enabled?: boolean
+}
+
 interface AuthConfig {
   users?: string
   session_timeout?: number
@@ -66,6 +76,7 @@ interface RealConfig {
   scheduler?: SchedulerConfig
   file_operations?: FileOpsConfig
   quota_alert?: QuotaAlertConfig
+  subscription?: SubscriptionConfig
   auth?: AuthConfig
   baidu?: {
     current_user?: any
@@ -121,6 +132,7 @@ export const useConfigStore = defineStore('config', () => {
           scheduler: serverConfig.scheduler || {},
           file_operations: serverConfig.file_operations || {},
           quota_alert: serverConfig.quota_alert || {},
+          subscription: serverConfig.subscription || {},
           auth: serverConfig.auth || {},
           baidu: serverConfig.baidu || {}
         }
@@ -240,6 +252,17 @@ export const useConfigStore = defineStore('config', () => {
     return updateConfig(newConfig)
   }
 
+  // 订阅同步配置更新
+  const updateSubscriptionConfig = async (subscriptionConfig: Partial<SubscriptionConfig>) => {
+    const newConfig = {
+      subscription: {
+        ...config.value.subscription,
+        ...subscriptionConfig
+      }
+    }
+    return updateConfig(newConfig)
+  }
+
   // 通知相关操作
   const testNotification = async () => {
     try {
@@ -340,6 +363,15 @@ export const useConfigStore = defineStore('config', () => {
         threshold_percent: 98,
         check_schedule: '0 0 * * *'
       },
+      subscription: {
+        enabled: false,
+        auto_sync: false,
+        schedule: '0 * * * *',
+        session_id: '',
+        save_dir_prefix: '/订阅',
+        max_pages: 10,
+        alert_enabled: true
+      },
       auth: {
         users: '',
         session_timeout: 3600
@@ -425,6 +457,7 @@ export const useConfigStore = defineStore('config', () => {
     updateFileOpsConfig,
     updateQuotaAlertConfig,
     updateAuthConfig,
+    updateSubscriptionConfig,
     
     // 通知相关
     testNotification,

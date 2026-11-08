@@ -101,6 +101,19 @@ export class ApiService {
     return httpClient.delete('/api/notify/fields', { name })
   }
 
+  // 订阅同步相关API
+  async previewSubscriptions(): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/subscriptions/preview')
+  }
+
+  async syncSubscriptions(): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/subscriptions/sync')
+  }
+
+  async getSubscriptionLogs(): Promise<ApiResponse<{ logs: any[] }>> {
+    return httpClient.get('/api/subscriptions/logs')
+  }
+
   async updateAuth(data: { username: string, password: string, old_password: string }): Promise<ApiResponse<void>> {
     return httpClient.post('/api/auth/update', data)
   }

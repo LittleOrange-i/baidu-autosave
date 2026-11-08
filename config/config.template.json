@@ -48,6 +48,15 @@
         "batch_size": 50,
         "concurrent_limit": 1
     },
+    "subscription": {
+        "enabled": false,
+        "auto_sync": false,
+        "schedule": "0 * * * *",
+        "session_id": "",
+        "save_dir_prefix": "/订阅",
+        "max_pages": 10,
+        "alert_enabled": true
+    },
     "auth": {
         "users": "admin",
         "password": "admin123",

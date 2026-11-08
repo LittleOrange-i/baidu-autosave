@@ -156,6 +156,10 @@ class TaskScheduler:
             
             # 获取任务列表
             tasks = self._get_current_tasks()
+
+            # 订阅同步任务与转存任务无关，需要在没有转存任务时也能生效
+            self._add_subscription_job()
+
             if not tasks:
                 logger.info("没有配置任何任务")
                 return
@@ -871,6 +875,79 @@ class TaskScheduler:
             logger.info(f"已添加网盘容量检查任务: {check_schedule}")
         except Exception as e:
             logger.error(f"添加网盘容量检查任务失败: {str(e)}")
+
+    def _add_subscription_job(self):
+        """添加订阅同步定时任务"""
+        try:
+            sub = self.storage.config.get('subscription', {}) or {}
+            if not sub.get('enabled', False) or not sub.get('auto_sync', False):
+                logger.info("订阅自动同步未启用")
+                return
+
+            schedule = (sub.get('schedule') or '0 * * * *').strip()
+            if len(schedule.split()) != 5:
+                logger.error(f"订阅同步 cron 表达式无效: {schedule}")
+                return
+
+            self.scheduler.add_job(
+                self._sync_subscriptions,
+                CronTrigger.from_crontab(convert_cron_weekday(schedule), timezone=pytz.timezone('Asia/Shanghai')),
+                id='subscription_sync',
+                replace_existing=True
+            )
+            logger.info(f"已添加订阅同步任务: {schedule}")
+        except Exception as e:
+            logger.error(f"添加订阅同步任务失败: {str(e)}")
+
+    def refresh_subscription_job(self):
+        """配置变更后刷新订阅同步任务"""
+        try:
+            if not self.scheduler or not self.scheduler.running:
+                return
+            if self.scheduler.get_job('subscription_sync'):
+                self.scheduler.remove_job('subscription_sync')
+            self._add_subscription_job()
+        except Exception as e:
+            logger.error(f"刷新订阅同步任务失败: {str(e)}")
+
+    def _sync_subscriptions(self):
+        """执行订阅同步；接口失效时发送钉钉告警"""
+        try:
+            logger.info("=== 开始订阅同步 ===")
+            if not self.storage:
+                logger.error("存储未初始化，跳过订阅同步")
+                return
+
+            result = self.storage.sync_subscription_tasks()
+            if not result.get('success'):
+                error_msg = result.get('error', '未知错误')
+                logger.error(f"订阅同步失败: {error_msg}")
+                self._send_subscription_alert(error_msg)
+                return
+
+            logger.info(f"订阅同步完成：新增 {result['added']}，已存在 {result['skipped']}，失败 {result['failed']}")
+            if result['added']:
+                try:
+                    notify_send('订阅同步', f"订阅同步完成，新增 {result['added']} 个转存任务，跳过 {result['skipped']} 个已存在订阅")
+                except Exception as e:
+                    logger.error(f"发送订阅同步通知失败: {str(e)}")
+        except Exception as e:
+            logger.error(f"订阅同步异常: {str(e)}")
+            self._send_subscription_alert(str(e))
+
+    def _send_subscription_alert(self, error_msg):
+        """发送订阅接口失效告警（复用已配置的通知渠道，含钉钉）"""
+        try:
+            sub = (self.storage.config.get('subscription', {}) if self.storage else {}) or {}
+            if not sub.get('alert_enabled', True):
+                return
+            notify_send(
+                '订阅同步告警',
+                f"百度网盘订阅接口调用失败，可能接口已失效或登录状态过期，请及时检查。\n错误信息：{error_msg}"
+            )
+            logger.info("订阅同步告警已发送")
+        except Exception as e:
+            logger.error(f"发送订阅同步告警失败: {str(e)}")
 
     def _check_disk_quota(self):
         """检查网盘容量并发送通知"""

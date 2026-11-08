@@ -35,6 +35,12 @@
             <template #title>仪表盘</template>
           </el-menu-item>
           
+          <!-- 订阅同步（主打功能） -->
+          <el-menu-item index="/subscriptions" class="menu-item">
+            <el-icon><Promotion /></el-icon>
+            <template #title>订阅同步</template>
+          </el-menu-item>
+          
           <!-- 任务管理 -->
           <el-menu-item index="/tasks" class="menu-item">
             <el-icon><List /></el-icon>
@@ -152,7 +158,7 @@ import { useTaskStore, useUserStore, useVersionStore } from '@/stores'
 import { usePolling } from '@/composables/usePolling'
 import { APP_VERSION } from '@/config/version'
 import { appStorage } from '@/utils/storage'
-import { Plus, Odometer, List, User, Setting, Download } from '@element-plus/icons-vue'
+import { Plus, Odometer, Promotion, List, User, Setting, Download } from '@element-plus/icons-vue'
 
 // Props & Emits
 interface Emits {

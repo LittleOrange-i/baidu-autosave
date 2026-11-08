@@ -88,6 +88,6 @@ fi\n\
 exec python web_app.py' > start.sh && \
     chmod +x start.sh
 
-EXPOSE 5000
+EXPOSE 5656
 
 CMD ["./start.sh"]

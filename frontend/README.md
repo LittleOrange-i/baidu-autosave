@@ -25,7 +25,7 @@ npm install
 # 在项目根目录下
 python web_app.py
 ```
-后端将运行在 `http://localhost:5000`
+后端将运行在 `http://localhost:5656`
 
 #### 2. 启动前端
 ```bash
@@ -40,7 +40,7 @@ start.bat
 ```
 
 启动后访问：http://localhost:3000  
-API 请求会自动代理到后端的 5000 端口
+API 请求会自动代理到后端的 5656 端口
 
 ### 生产构建
 
@@ -152,8 +152,8 @@ export const VERSION_CONFIG = {
 server: {
   port: 3000,
   proxy: {
-    '/api': 'http://localhost:5000',
-    '/login': 'http://localhost:5000'
+    '/api': 'http://localhost:5656',
+    '/login': 'http://localhost:5656'
   }
 }
 ```
@@ -227,7 +227,7 @@ export function useTasks() {
 
 ### 开发环境部署
 
-1. 启动后端服务（端口5000）
+1. 启动后端服务（端口5656）
 2. 启动前端开发服务器：`npm run dev`
 3. 访问 http://localhost:3000
 

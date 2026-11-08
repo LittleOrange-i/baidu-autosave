@@ -244,13 +244,13 @@ def _publish_task_completed(task_order, task_uid=None):
 
 
 def get_server_port():
-    """从环境变量读取服务端口，默认保持 5000 兼容。"""
-    raw_port = os.environ.get('WEB_APP_PORT') or os.environ.get('PORT') or '5000'
+    """从环境变量读取服务端口，默认使用 5656。"""
+    raw_port = os.environ.get('WEB_APP_PORT') or os.environ.get('PORT') or '5656'
     try:
         return int(raw_port)
     except ValueError:
-        logger.warning(f"无效的服务端口配置: {raw_port}，回退到 5000")
-        return 5000
+        logger.warning(f"无效的服务端口配置: {raw_port}，回退到 5656")
+        return 5656
 
 
 # 登录装饰器
@@ -1141,6 +1141,7 @@ def get_config():
         'quota_alert': storage.config.get('quota_alert', {}),
         'share': storage.config.get('share', {}),
         'file_operations': storage.config.get('file_operations', {}),
+        'subscription': storage.config.get('subscription', {}),
         'auth': auth_config,
         'baidu': {
             'current_user': current_user  # 返回完整的用户信息
@@ -1255,7 +1256,88 @@ def update_config():
                 'message': f'配置已保存，但更新通知配置失败: {str(e)}'
             })
     
+    # 处理订阅同步配置更新
+    if scheduler and 'subscription' in data:
+        try:
+            scheduler.refresh_subscription_job()
+            logger.info('订阅同步配置已更新')
+        except Exception as e:
+            logger.error(f'更新订阅同步配置失败: {str(e)}')
+    
     return jsonify({'success': True, 'message': '更新配置成功'})
+
+def _append_subscription_log(message, level='INFO'):
+    """记录订阅同步日志（内存保留最近 200 条，同时写入系统日志）"""
+    if not hasattr(app, 'subscription_logs'):
+        app.subscription_logs = []
+    entry = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'level': level,
+        'message': message,
+    }
+    app.subscription_logs.append(entry)
+    if len(app.subscription_logs) > 200:
+        app.subscription_logs = app.subscription_logs[-200:]
+    if level == 'ERROR':
+        logger.error(f"[订阅同步] {message}")
+    else:
+        logger.info(f"[订阅同步] {message}")
+    return entry
+
+
+@app.route('/api/subscriptions/preview', methods=['POST'])
+@login_required
+@handle_api_error
+def preview_subscriptions():
+    """预览订阅分享（只拉取解析，不创建任务）"""
+    if not storage:
+        return jsonify({'success': False, 'message': '存储未初始化'})
+
+    _append_subscription_log('开始预览订阅分享')
+    result = storage.sync_subscription_tasks(dry_run=True, progress_callback=_append_subscription_log)
+    if not result['success']:
+        _append_subscription_log(f"预览失败: {result.get('error')}", level='ERROR')
+        return jsonify({'success': False, 'message': result.get('error', '预览失败'), 'items': result.get('items', [])})
+
+    _append_subscription_log(f"预览完成：新增 {result['added']}，已存在 {result['skipped']}")
+    return jsonify({
+        'success': True,
+        'items': result.get('items', []),
+        'added': result['added'],
+        'skipped': result['skipped']
+    })
+
+
+@app.route('/api/subscriptions/sync', methods=['POST'])
+@login_required
+@handle_api_error
+def sync_subscriptions():
+    """执行订阅同步：拉取订阅分享并批量创建转存任务（已存在的自动跳过）"""
+    if not storage:
+        return jsonify({'success': False, 'message': '存储未初始化'})
+
+    _append_subscription_log('开始同步订阅分享')
+    result = storage.sync_subscription_tasks(progress_callback=_append_subscription_log)
+    if not result['success']:
+        _append_subscription_log(f"同步失败: {result.get('error')}", level='ERROR')
+        return jsonify({'success': False, 'message': result.get('error', '同步失败'), 'items': result.get('items', [])})
+
+    _append_subscription_log(f"同步完成：新增 {result['added']}，已存在 {result['skipped']}，失败 {result['failed']}")
+    return jsonify({
+        'success': True,
+        'added': result['added'],
+        'skipped': result['skipped'],
+        'failed': result['failed'],
+        'items': result.get('items', [])
+    })
+
+
+@app.route('/api/subscriptions/logs', methods=['GET'])
+@login_required
+@handle_api_error
+def get_subscription_logs():
+    """获取订阅同步日志"""
+    return jsonify({'success': True, 'logs': getattr(app, 'subscription_logs', [])})
 
 @app.route('/api/notify/test', methods=['POST'])
 @login_required

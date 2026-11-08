@@ -43,19 +43,29 @@ git clone https://github.com/your-username/baidu-autosave.git
 cd baidu-autosave
 ```
 
-2. 安装依赖：
+2. 安装 uv（已安装可跳过）：
 ```bash
-pip install -r requirements.txt
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-3. 运行应用：
+3. 创建虚拟环境并安装依赖（项目要求 Python 3.10）：
 ```bash
-python web_app.py
+uv venv --python 3.10
+uv pip install -r requirements.txt
 ```
 
-4. 访问Web界面：
+4. 运行应用：
+```bash
+uv run python web_app.py
 ```
-http://localhost:5000
+
+5. 访问Web界面：
+```
+http://localhost:5656
 ```
 
 ## Docker 部署
@@ -72,7 +82,7 @@ services:
     container_name: baidu-autosave
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5656:5656"
     volumes:
       - ./config:/app/config
       - ./log:/app/log
@@ -97,7 +107,7 @@ docker-compose logs -f
 
 5. 访问Web界面：
 ```
-http://localhost:5000
+http://localhost:5656
 ```
 
 > 默认登录账号：admin  
@@ -115,7 +125,7 @@ mkdir -p config log
 docker run -d \
   --name baidu-autosave \
   --restart unless-stopped \
-  -p 5000:5000 \
+  -p 5656:5656 \
   -v $(pwd)/config:/app/config \
   -v $(pwd)/log:/app/log \
   -e TZ=Asia/Shanghai \
@@ -129,7 +139,7 @@ docker logs -f baidu-autosave
 
 4. 访问Web界面：
 ```
-http://localhost:5000
+http://localhost:5656
 ```
 > 默认登录账号：admin  
 > 默认登录密码：admin123

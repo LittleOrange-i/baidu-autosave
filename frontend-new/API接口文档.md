@@ -5,7 +5,7 @@
 本文档描述了百度网盘自动追更系统的所有后端API接口。
 
 **基础信息：**
-- 基础URL: `http://localhost:5000`
+- 基础URL: `http://localhost:5656`
 - 框架: Flask
 - 认证方式: Session-based
 - 响应格式: JSON

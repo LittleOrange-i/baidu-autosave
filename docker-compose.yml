@@ -6,7 +6,7 @@ services:
     container_name: baidu-autosave
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5656:5656"
     volumes:
       - ./config:/app/config
       - ./log:/app/log
