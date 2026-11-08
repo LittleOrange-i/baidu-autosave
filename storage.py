@@ -1320,10 +1320,11 @@ class BaiduStorage:
                 if progress_callback:
                     progress_callback('info', f'【步骤2/4】扫描本地目录: {save_dir}')
                 
-                # 获取本地文件列表
+                # 获取本地文件列表（同时收集「文件名 -> 大小」，用于对比诊断）
                 local_files = []
+                local_file_sizes = {}
                 if save_dir:
-                    local_files = self.list_local_files(save_dir, client=temp_client)
+                    local_files = self.list_local_files(save_dir, client=temp_client, size_map=local_file_sizes)
                     if progress_callback:
                         progress_callback('info', f'本地目录中有 {len(local_files)} 个文件')
                 
@@ -1344,6 +1345,25 @@ class BaiduStorage:
                 transfer_list = []  # 存储(fs_id, dir_path, clean_path, final_path, need_rename)元组
                 rename_only_list = []  # 存储仅需重命名的文件(None, dir_path, clean_path, final_path, True)
                 
+                # 对比诊断：统计「因已存在而跳过」的文件，重点标记同名但大小不同的（疑似上游更新了内容）
+                skipped_count = 0
+                diff_size_records = []
+
+                def _to_int_size(value):
+                    try:
+                        return int(value)
+                    except (TypeError, ValueError):
+                        return 0
+
+                def _record_skipped(display_path, compare_name, shared_size):
+                    """记录一个被判定为"已存在"而跳过的文件；同名但大小不同则视作疑似更新。"""
+                    nonlocal skipped_count
+                    skipped_count += 1
+                    s_size = _to_int_size(shared_size)
+                    l_size = _to_int_size(local_file_sizes.get(compare_name))
+                    if s_size and l_size and s_size != l_size:
+                        diff_size_records.append((display_path, s_size, l_size))
+
                 # 使用之前收集的共享文件信息进行对比
                 for file_info in shared_files_info:
                     clean_path = file_info['path']
@@ -1385,6 +1405,7 @@ class BaiduStorage:
                             logger.debug(f"重命名后文件已存在，跳过: {final_path}")
                             if progress_callback:
                                 progress_callback('info', f'文件已存在，跳过: {final_path}')
+                            _record_skipped(final_path, final_normalized, file_info.get('size'))
                             continue
                         # else: 原文件和重命名后文件都不存在，需要转存+重命名
                     else:  # 不需要重命名
@@ -1392,6 +1413,7 @@ class BaiduStorage:
                             logger.debug(f"文件已存在，跳过: {final_path}")
                             if progress_callback:
                                 progress_callback('info', f'文件已存在，跳过: {final_path}')
+                            _record_skipped(final_path, final_normalized, file_info.get('size'))
                             continue
                     
                     # 检查是否在指定的文件列表中（使用原始路径检查）
@@ -1468,6 +1490,20 @@ class BaiduStorage:
                                     if progress_callback:
                                         progress_callback('warning', f'重命名失败，将稍后重试: {str(e)}')
                 
+                # 输出对比诊断日志，用于确认「同名文件内容是否已更新」
+                logger.info(
+                    f"[对比诊断] 分享侧文件 {len(shared_files_info)} 个，本地已存在文件 {len(local_files)} 个，"
+                    f"本次需转存 {len(transfer_list)} 个，因已存在跳过 {skipped_count} 个"
+                )
+                if diff_size_records:
+                    logger.warning(
+                        f"[对比诊断] 发现 {len(diff_size_records)} 个「同名但大小不同」的文件，疑似上游已更新内容："
+                    )
+                    for name, s_size, l_size in diff_size_records[:20]:
+                        logger.warning(f"[对比诊断]   {name}  分享大小={s_size}  本地大小={l_size}")
+                else:
+                    logger.info("[对比诊断] 未发现同名但大小不同的文件")
+
                 # 检查是否有需要转存的文件
                 if not transfer_list and not rename_only_success:
                     if progress_callback:
@@ -2244,11 +2280,19 @@ class BaiduStorage:
             logger.error(f"检查存储状态失败: {str(e)}")
             return False
             
-    def list_local_files(self, dir_path, client=None):
+    @staticmethod
+    def _get_entry_size(item):
+        """读取列表项的文件大小（兼容 dict 与 namedtuple）"""
+        if isinstance(item, dict):
+            return item.get('size')
+        return getattr(item, 'size', None)
+
+    def list_local_files(self, dir_path, client=None, size_map=None):
         """获取本地目录中的所有文件列表
         Args:
             dir_path: 目录路径
             client: 客户端实例，默认为None则使用self.client
+            size_map: 可选，传入 dict 时会额外收集「文件名 -> 大小」，用于转存对比诊断
         """
         try:
             if client is None:
@@ -2296,6 +2340,9 @@ class BaiduStorage:
                             # 只保留文件名进行对比
                             file_name = os.path.basename(item_path)
                             files.append(file_name)
+                            if size_map is not None:
+                                # 额外记录文件大小，用于诊断「同名但内容已更新」的情况
+                                size_map[file_name] = self._get_entry_size(item)
                             logger.debug(f"记录本地文件: {file_name}")
                         elif self._is_list_entry_dir(item):
                             _list_dir(item_path)
