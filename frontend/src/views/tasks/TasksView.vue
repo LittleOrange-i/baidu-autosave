@@ -453,6 +453,19 @@ const uniqueCategories = computed(() => {
 })
 
 const filteredTasks = computed(() => {
+  const hasFilter = !!searchQuery.value || statusFilter.value !== 'all' || categoryFilter.value !== 'all'
+
+  // 无筛选时不做筛选/拷贝，直接复用 tasks 数组以保证引用稳定
+  // 否则轮询刷新会导致表格 data 引用变化，从而清空用户已勾选的行
+  if (!hasFilter) {
+    if (!isReversed.value) {
+      // 正序：store 中已按 order 升序维护，直接返回原数组
+      return tasks.value
+    }
+    // 倒序：生成新数组并降序排列
+    return tasks.value.slice().sort((a, b) => (b.order || 0) - (a.order || 0))
+  }
+
   let result = tasks.value
 
   // 搜索筛选（任务名称、保存路径、分类）

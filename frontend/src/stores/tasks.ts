@@ -307,9 +307,28 @@ export const useTaskStore = defineStore('tasks', () => {
 
   // 轮询更新处理
   const handleTaskUpdate = (updatedTasks: Task[]) => {
-    // 更新任务列表
-    const sortedTasks = updatedTasks.sort((a, b) => (a.order || 0) - (b.order || 0))
-    tasks.value = sortedTasks
+    // 按 order 升序整理最新任务列表
+    const sortedTasks = [...updatedTasks].sort((a, b) => (a.order || 0) - (b.order || 0))
+
+    // 就地合并：复用已存在的任务对象，仅覆盖变化的字段，
+    // 目的是保持 tasks 数组引用与行对象引用稳定，避免 el-table 因 data 引用变化而清空已勾选的行
+    const currentMap = new Map(tasks.value.map(task => [task.order, task]))
+    const merged = sortedTasks.map(task => {
+      const existing = currentMap.get(task.order)
+      if (existing) {
+        Object.assign(existing, task)
+        return existing
+      }
+      // 新增任务，直接使用后端返回的新对象
+      return task
+    })
+
+    // 仅当任务集合（数量/顺序/新增）发生变化时才替换数组引用
+    const sameTasks = merged.length === tasks.value.length &&
+      merged.every((task, index) => task === tasks.value[index])
+    if (!sameTasks) {
+      tasks.value = merged
+    }
   }
 
   // 选择操作

@@ -1524,15 +1524,31 @@ class BaiduStorage:
                 # 步骤3.2：创建所有必要的目录
                 logger.info("确保所有目标目录存在")
                 created_dirs = set()
+                verified_dirs = set()  # 本次转存中已确认存在的目录（含各级父目录），避免重复列举
                 for _, dir_path, _, _, _ in transfer_list:
-                    if dir_path not in created_dirs:
-                        logger.info(f"检查目录: {dir_path}")
-                        if not self._ensure_dir_tree_exists(dir_path, client=temp_client):
-                            logger.error(f"创建目录失败: {dir_path}")
-                            if progress_callback:
-                                progress_callback('error', f'创建目录失败: {dir_path}')
-                            return {'success': False, 'error': f'创建目录失败: {dir_path}'}
-                        created_dirs.add(dir_path)
+                    if dir_path in created_dirs:
+                        continue
+
+                    logger.info(f"检查目录: {dir_path}")
+                    parent_dir = posixpath.dirname(dir_path)
+                    if parent_dir in verified_dirs:
+                        # 父目录已确认存在，只需确保当前目录，无需从根目录逐级重新校验
+                        ensured = self._ensure_dir_exists(dir_path, client=temp_client)
+                    else:
+                        ensured = self._ensure_dir_tree_exists(dir_path, client=temp_client)
+
+                    if not ensured:
+                        logger.error(f"创建目录失败: {dir_path}")
+                        if progress_callback:
+                            progress_callback('error', f'创建目录失败: {dir_path}')
+                        return {'success': False, 'error': f'创建目录失败: {dir_path}'}
+
+                    created_dirs.add(dir_path)
+                    # 记录当前目录及其所有上级目录为「已存在」，供后续文件复用
+                    current_path = dir_path
+                    while current_path and current_path not in ('/', ''):
+                        verified_dirs.add(current_path)
+                        current_path = posixpath.dirname(current_path)
                 
                 # 步骤4：执行文件转存
                 logger.info(f"=== 【步骤4/4】开始执行转存操作 ===")
@@ -2156,7 +2172,73 @@ class BaiduStorage:
         """带重试功能的获取分享文件列表方法"""
         if client is None:
             client = self.client
-        return client.shared_paths(shared_url=shared_url)
+        try:
+            return client.shared_paths(shared_url=shared_url)
+        except AssertionError:
+            # 百度已升级分享页格式：新版页面不再内嵌 yunData.setData/locals.mset，
+            # 而 baidupcs-py(0.7.6，PyPI 最新版) 仅能解析旧格式，故此处做兜底解析
+            paths = self._shared_paths_from_new_page(shared_url, client)
+            if paths is not None:
+                logger.info(f"使用新版分享页解析方式获取分享文件列表，共 {len(paths)} 项")
+                return paths
+            raise
+
+    def _shared_paths_from_new_page(self, shared_url, client):
+        """兜底解析百度新版分享页，返回值与 client.shared_paths 保持一致
+
+        新版分享页把分享信息以纯 JSON 内嵌在 <script id="locals-data"> 节点中，
+        包含 uk/share_uk、shareid、bdstoken 及 file_list，旧版 baidupcs-py 无法解析。
+
+        Args:
+            shared_url: 分享链接
+            client: BaiduPCSApi 实例
+        Returns:
+            list[PcsSharedPath]：成功返回分享路径列表；无法解析时返回 None
+        """
+        try:
+            from baidupcs_py.baidupcs.pcs import Method
+            from baidupcs_py.baidupcs.inner import PcsSharedPath
+
+            pcs = getattr(client, '_baidupcs', None)
+            if pcs is None:
+                return None
+
+            # 复用底层会话请求分享页，自动携带 access_shared 后的 cookies
+            resp = pcs._request(Method.Get, shared_url, params=None)
+            html = resp.text
+            # 同步响应下发的 cookie（如 BDCLND），保证后续列表/转存接口可用
+            try:
+                pcs._cookies_update(resp.cookies.get_dict())
+            except Exception:
+                pass
+
+            m = re.search(r'id="locals-data"[^>]*>(.*?)</script>', html, re.S)
+            if not m:
+                logger.debug("新版分享页未找到 locals-data 节点")
+                return None
+
+            info = json.loads(m.group(1).strip())
+            uk = info.get('share_uk') or info.get('uk')
+            share_id = info.get('shareid')
+            bdstoken = info.get('bdstoken')
+            if not uk or not share_id:
+                logger.warning("新版分享页缺少 uk/shareid，解析分享信息失败")
+                return None
+            uk = int(uk)
+
+            file_list = info.get('file_list')
+            if isinstance(file_list, dict):
+                file_list = file_list.get('list')
+            if not file_list:
+                return []
+
+            return [
+                PcsSharedPath.from_(item)._replace(uk=uk, share_id=int(share_id), bdstoken=bdstoken)
+                for item in file_list
+            ]
+        except Exception as e:
+            logger.debug(f"兜底解析新版分享页失败: {e}")
+            return None
 
     @api_retry(max_retries=1, delay_range=(2, 3))
     def _list_shared_paths_with_retry(self, path, uk, share_id, bdstoken, page=1, size=100, client=None):

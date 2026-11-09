@@ -20,6 +20,7 @@ import socket
 import threading
 import queue
 
+import gevent
 from gevent.pywsgi import WSGIServer
 
 # GitHub 仓库信息
@@ -39,7 +40,8 @@ logger.remove()  # 移除默认的控制台输出
 
 # 定义统一的日志格式和级别
 log_format = "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
-log_level = "DEBUG"  # 使用DEBUG级别，可以看到所有日志
+log_level = "DEBUG"  # 文件日志级别：保留完整调试信息
+console_log_level = "INFO"  # 控制台日志级别：避免大量 DEBUG 刷屏终端（需要排查时可改回 DEBUG）
 
 # 过滤敏感信息
 def filter_sensitive_info(record):
@@ -76,7 +78,7 @@ logger.configure(patcher=filter_sensitive_info)
 
 # 添加彩色的控制台输出（带轮询过滤）
 logger.add(sys.stdout, 
-          level=log_level, 
+          level=console_log_level, 
           format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
           filter=filter_polling_requests)  # 添加轮询过滤器
 
@@ -126,6 +128,11 @@ CORS(app)
 # 全局变量声明
 storage = None
 scheduler = None
+
+# SSE 任务流参数：轮询间隔需保持较小以保证推送及时；
+# 空闲超过心跳间隔后回送一次心跳，用于保活并探测任务是否已结束。
+SSE_POLL_INTERVAL = 0.2
+SSE_HEARTBEAT_INTERVAL = 15
 
 
 def _ensure_task_runtime_state():
@@ -2179,6 +2186,7 @@ def stream_task(task_ref):
     def event_stream():
         event_queue = queue.Queue(maxsize=200)
         _register_task_stream(task_uid, event_queue)
+        idle_seconds = 0.0  # 累计空闲时长，用于触发心跳
 
         try:
             yield _format_sse('connected', {
@@ -2189,9 +2197,18 @@ def stream_task(task_ref):
             yield _format_sse('snapshot', _build_task_stream_snapshot(task))
 
             while True:
+                # 注意：本项目使用 gevent WSGIServer 且未启用 monkey patch，
+                # 必须用 get_nowait + gevent.sleep 让出事件循环；
+                # 若使用阻塞式 queue.get(timeout=...) 会冻结整个服务器，表现为前端界面卡死。
                 try:
-                    event_name, payload = event_queue.get(timeout=15)
+                    event_name, payload = event_queue.get_nowait()
                 except queue.Empty:
+                    gevent.sleep(SSE_POLL_INTERVAL)
+                    idle_seconds += SSE_POLL_INTERVAL
+                    if idle_seconds < SSE_HEARTBEAT_INTERVAL:
+                        continue
+
+                    idle_seconds = 0.0
                     latest_task = storage.resolve_task(task_uid, order=task_order, url=task_url)
                     if latest_task is None:
                         yield _format_sse('completed', {
@@ -2208,6 +2225,7 @@ def stream_task(task_ref):
                     })
                     continue
 
+                idle_seconds = 0.0
                 yield _format_sse(event_name, payload)
                 if event_name == 'completed':
                     break
