@@ -12,7 +12,7 @@ export const TASK_STATUS = {
 export const TASK_STATUS_TEXT = {
   [TASK_STATUS.NORMAL]: '正常',
   [TASK_STATUS.ERROR]: '错误',
-  [TASK_STATUS.RUNNING]: '运行中',
+  [TASK_STATUS.RUNNING]: '执行中',
   [TASK_STATUS.SUCCESS]: '成功'
 } as const
 

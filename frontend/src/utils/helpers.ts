@@ -215,7 +215,7 @@ export function getTaskStatusText(status: string): string {
   const statusMap: Record<string, string> = {
     normal: '正常',
     error: '错误',
-    running: '运行中',
+    running: '执行中',
     success: '成功'
   }
   return statusMap[status] || status

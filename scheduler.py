@@ -597,6 +597,9 @@ class TaskScheduler:
                 self.storage.update_task_status_by_order(task_order, 'failed', error_msg)
                 return False
 
+            # 标记为运行中，便于前端在定时执行期间显示“执行中”
+            self.storage.update_task_status_by_order(task_order, 'running', '正在执行任务')
+
             result = self.storage.transfer_share(
                 current_task['url'],
                 current_task.get('pwd', ''),  # 使用空字符串作为默认值

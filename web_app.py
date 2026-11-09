@@ -288,6 +288,12 @@ def init_app():
         # 初始化存储
         logger.info("正在初始化存储...")
         storage = BaiduStorage()
+
+        # 任务状态会持久化，上次异常退出可能残留“运行中”，启动时统一复位
+        try:
+            storage.reset_running_tasks()
+        except Exception as e:
+            logger.error(f"复位运行中任务失败: {str(e)}")
         
         # 使用已创建的 storage 实例初始化调度器
         try:
@@ -1466,7 +1472,8 @@ def execute_all_tasks():
     if not selected_tasks:
         return jsonify({'success': False, 'message': '未找到指定的任务'})
 
-    # 入队：标记运行状态并重置各自日志，保证前端立即可见“执行中”
+    # 入队：统一标记为“执行中”并重置各自日志，保证前端立即看到执行状态，
+    # 每个任务真正跑完后会再更新为正常/错误
     _ensure_task_runtime_state()
     queued_count = 0
     for task in selected_tasks:
@@ -1547,6 +1554,10 @@ def execute_all_tasks():
                         logger.info(f"[任务{_order}] {message}")
 
                 try:
+                    # 轮到该任务执行：置为“执行中”，便于前端实时看到状态变化
+                    storage.update_task_status_by_order(task_order, 'running', '正在执行任务')
+                    _publish_task_status(task_order, task_uid)
+
                     _append_task_log(
                         task_order,
                         f'开始执行任务（{index}/{total}）: {task_name}',

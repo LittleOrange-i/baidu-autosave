@@ -27,7 +27,7 @@
         <el-select v-model="statusFilter" placeholder="状态筛选" style="width: 120px">
           <el-option label="全部" value="all" />
           <el-option label="正常" value="normal" />
-          <el-option label="运行中" value="running" />
+          <el-option label="执行中" value="running" />
           <el-option label="成功" value="success" />
           <el-option label="错误" value="error" />
         </el-select>

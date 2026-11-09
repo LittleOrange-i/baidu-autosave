@@ -2775,7 +2775,7 @@ class BaiduStorage:
         """基于order更新任务状态
         Args:
             order: 任务顺序号
-            status: 任务状态 (normal/error)
+            status: 任务状态 (running/normal/error 等)
             message: 状态消息
             error: 错误信息（如果有）
             transferred_files: 成功转存的文件列表
@@ -2785,9 +2785,13 @@ class BaiduStorage:
             for task in tasks:
                 if task.get('order') == order:
                     # 状态转换逻辑
-                    if message and ('成功' in message or '没有新文件需要转存' in message):
+                    if status == 'running':
+                        # 执行中：保留运行态，便于前端展示“执行中”；
+                        # 任务结束时会再次调用本方法更新为 normal/error
+                        task['status'] = 'running'
+                    elif message and ('成功' in message or '没有新文件需要转存' in message):
                         task['status'] = 'normal'
-                    elif status in ['success', 'skipped', 'pending', 'running']:
+                    elif status in ['success', 'skipped', 'pending', 'normal']:
                         task['status'] = 'normal'
                     else:
                         task['status'] = 'error'
@@ -2806,12 +2810,36 @@ class BaiduStorage:
                     task['last_execute_time'] = int(time.time())
                     
                     self._save_config()
-                    logger.info(f"已更新任务状态: order={order} -> {task['status']} ({message})")
+                    # 状态变更属于内部细节，进度信息已由调用方输出，这里降为 debug 避免控制台刷屏
+                    logger.debug(f"已更新任务状态: order={order} -> {task['status']} ({message})")
                     return True
             return False
         except Exception as e:
             logger.error(f"更新任务状态失败: {str(e)}")
             return False
+
+    def reset_running_tasks(self):
+        """将残留的“运行中”任务复位为正常状态
+
+        任务状态会被持久化，若上次运行被中断（如进程被杀掉），
+        启动时会残留 running 状态，导致界面一直显示“执行中”，故在此统一复位。
+        Returns:
+            int: 被复位的任务数量
+        """
+        try:
+            changed = 0
+            for task in self.config['baidu']['tasks']:
+                if task.get('status') == 'running':
+                    task['status'] = 'normal'
+                    task['message'] = '已复位（上次执行被中断）'
+                    changed += 1
+            if changed:
+                self._save_config()
+                logger.warning(f"已将 {changed} 个残留的“运行中”任务复位为正常状态")
+            return changed
+        except Exception as e:
+            logger.error(f"复位运行中任务失败: {str(e)}")
+            return 0
 
     def remove_task_by_order(self, order):
         """基于order删除转存任务
