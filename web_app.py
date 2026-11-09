@@ -1411,9 +1411,13 @@ def with_execution_lock(f):
 @app.route('/api/tasks/execute-all', methods=['POST'])
 @login_required
 @handle_api_error
-@with_execution_lock
 def execute_all_tasks():
-    """批量执行任务"""
+    """批量执行任务
+
+    采用异步方式：请求立即返回，实际转存在后台线程中逐个执行。
+    这样可避免前端 HTTP 请求超时（默认 30s）导致的“报错但后端仍在执行”，
+    同时为每个任务记录独立日志，便于执行完成后单独查看。
+    """
     if not storage:
         return jsonify({'success': False, 'message': '存储未初始化'})
         
@@ -1461,88 +1465,171 @@ def execute_all_tasks():
 
     if not selected_tasks:
         return jsonify({'success': False, 'message': '未找到指定的任务'})
-    
-    results = {
-        'success': [],
-        'skipped': [],
-        'failed': [],
-        'transferred_files': {}
-    }
-    
-    for selected_task in selected_tasks:
-        task = storage.resolve_task(selected_task)
-        if not task:
-            task = storage.resolve_task(
-                task_uid=selected_task.get('task_uid'),
-                order=selected_task.get('order'),
-                url=selected_task.get('url')
-            )
 
-        if not task:
-            logger.warning(f"批量执行时任务已不存在: {selected_task}")
-            results['failed'].append(selected_task)
-            continue
-
+    # 入队：标记运行状态并重置各自日志，保证前端立即可见“执行中”
+    _ensure_task_runtime_state()
+    queued_count = 0
+    for task in selected_tasks:
         task_order = task.get('order')
+        task_uid = task.get('task_uid')
         if not task_order:
             continue
+        _remember_task_stream(task_uid, task_order)
+        storage.update_task_status_by_order(task_order, 'running', '已加入批量执行队列')
+        _publish_task_status(task_order, task_uid)
+        app.task_logs[task_order] = []
+        _append_task_log(
+            task_order,
+            f'已加入批量执行队列: {task.get("name") or task_order}',
+            task_uid=task_uid
+        )
+        queued_count += 1
 
+    if not queued_count:
+        return jsonify({'success': False, 'message': '未找到可执行的任务'})
+
+    def execute_batch_async():
+        """后台线程：逐个执行批量任务，并记录每个任务的独立日志"""
+        # 与调度器共用同一把执行锁，避免手动批量执行与定时任务并发操作同一账号
+        exec_lock = getattr(scheduler, '_execution_lock', None) if scheduler else None
+        if exec_lock is not None:
+            exec_lock.acquire()
         try:
-            result = storage.transfer_share(
-                task['url'],
-                task.get('pwd'),
-                None,
-                task.get('save_dir'),
-                None,  # progress_callback
-                task   # task_config
-            )
-            
-            if result.get('success'):
-                if result.get('skipped'):
-                    results['skipped'].append(task)
-                    storage.update_task_status_by_order(task_order, 'skipped', '没有新文件需要转存')
-                else:
-                    transferred_files = result.get('transferred_files', [])
-                    if transferred_files:
-                        results['success'].append(task)
-                        results['transferred_files'][task['url']] = transferred_files
-                        storage.update_task_status_by_order(
-                            task_order, 
-                            'success',
-                            '转存成功',
-                            transferred_files=transferred_files
-                        )
+            results = {
+                'success': [],
+                'skipped': [],
+                'failed': [],
+                'transferred_files': {}
+            }
+            total = len(selected_tasks)
+
+            for index, selected_task in enumerate(selected_tasks, start=1):
+                # 每轮都重新解析，避免任务被重排/删除后串任务
+                task = storage.resolve_task(
+                    task_uid=selected_task.get('task_uid'),
+                    order=selected_task.get('order'),
+                    url=selected_task.get('url')
+                )
+
+                task_order = selected_task.get('order')
+                task_uid = selected_task.get('task_uid')
+                task_name = selected_task.get('name') or f'任务{task_order}'
+
+                if not task:
+                    logger.warning(f"批量执行时任务已不存在: {selected_task}")
+                    results['failed'].append(selected_task)
+                    _append_task_log(task_order, '任务已不存在，跳过', level='ERROR', task_uid=task_uid)
+                    _publish_task_completed(task_order, task_uid)
+                    continue
+
+                # 使用最新任务数据
+                task_order = task.get('order')
+                task_uid = task.get('task_uid') or task_uid
+                if not task_order:
+                    continue
+
+                task_name = task.get('name') or task_name
+
+                def progress_callback(status, message, _order=task_order, _uid=task_uid):
+                    """实时记录任务执行进度（写入该任务独立日志，执行完仍可查看）"""
+                    level = status.upper() if status in ['error', 'info', 'warning'] else 'INFO'
+                    _append_task_log(_order, message, level=level, task_uid=_uid)
+
+                    # 同时更新任务状态消息
+                    if status != 'error':
+                        storage.update_task_status_by_order(_order, 'running', message)
+                        _publish_task_status(_order, _uid)
+
+                    # 记录到系统日志
+                    if status == 'error':
+                        logger.error(f"[任务{_order}] {message}")
                     else:
-                        results['skipped'].append(task)
-                        storage.update_task_status_by_order(task_order, 'skipped', '没有新文件需要转存')
-            else:
-                error_msg = result.get('error', '转存失败')
-                results['failed'].append(task)
-                storage.update_task_status_by_order(task_order, 'failed', error_msg)
-                
-        except Exception as e:
-            error_msg = str(e)
-            if "error_code: 115" in error_msg:
-                error_msg = "该分享链接已失效（文件禁止分享）"
+                        logger.info(f"[任务{_order}] {message}")
+
                 try:
-                    storage.remove_task_by_order(task_order)
-                except Exception as del_err:
-                    logger.error(f"删除失效任务失败: {str(del_err)}")
-            results['failed'].append(task)
-            storage.update_task_status_by_order(task_order, 'failed', error_msg)
-    
-    # 发送通知
-    if results['success'] or results['failed']:
-        try:
-            notification_content = generate_transfer_notification(results)
-            notify_send("百度网盘自动追更", notification_content)
-        except Exception as e:
-            logger.error(f"发送通知失败: {str(e)}")
-    
+                    _append_task_log(
+                        task_order,
+                        f'开始执行任务（{index}/{total}）: {task_name}',
+                        task_uid=task_uid
+                    )
+
+                    result = storage.transfer_share(
+                        task['url'],
+                        task.get('pwd'),
+                        None,
+                        task.get('save_dir'),
+                        progress_callback,
+                        task   # task_config
+                    )
+
+                    if result.get('success'):
+                        transferred_files = result.get('transferred_files', [])
+                        if result.get('skipped'):
+                            results['skipped'].append(task)
+                            storage.update_task_status_by_order(task_order, 'normal', '没有新文件需要转存')
+                            _append_task_log(task_order, '没有新文件需要转存', task_uid=task_uid)
+                        elif transferred_files:
+                            results['success'].append(task)
+                            results['transferred_files'][task['url']] = transferred_files
+                            storage.update_task_status_by_order(
+                                task_order,
+                                'normal',
+                                '转存成功',
+                                transferred_files=transferred_files
+                            )
+                            _append_task_log(
+                                task_order,
+                                f'转存成功，共 {len(transferred_files)} 个文件',
+                                task_uid=task_uid
+                            )
+                        else:
+                            results['skipped'].append(task)
+                            storage.update_task_status_by_order(task_order, 'normal', '没有新文件需要转存')
+                            _append_task_log(task_order, '没有新文件需要转存', task_uid=task_uid)
+                    else:
+                        error_msg = result.get('error', '转存失败')
+                        results['failed'].append(task)
+                        storage.update_task_status_by_order(task_order, 'error', error_msg)
+                        _append_task_log(task_order, f'任务执行失败: {error_msg}', level='ERROR', task_uid=task_uid)
+
+                except Exception as e:
+                    error_msg = str(e)
+                    if "error_code: 115" in error_msg:
+                        error_msg = "该分享链接已失效（文件禁止分享）"
+                        try:
+                            storage.remove_task_by_order(task_order)
+                            storage._update_task_orders()
+                        except Exception as del_err:
+                            logger.error(f"删除失效任务失败: {str(del_err)}")
+                    results['failed'].append(task)
+                    storage.update_task_status_by_order(task_order, 'error', error_msg)
+                    _append_task_log(task_order, f'任务执行异常: {error_msg}', level='ERROR', task_uid=task_uid)
+                finally:
+                    # 每个任务结束都发布一次状态与完成事件，便于前端单独查看结果
+                    _publish_task_status(task_order, task_uid)
+                    _publish_task_completed(task_order, task_uid)
+
+            # 发送通知
+            if results['success'] or results['failed']:
+                try:
+                    notification_content = generate_transfer_notification(results)
+                    notify_send("百度网盘自动追更", notification_content)
+                except Exception as e:
+                    logger.error(f"发送通知失败: {str(e)}")
+        finally:
+            if exec_lock is not None:
+                exec_lock.release()
+
+    # 启动后台线程并立即返回，避免前端请求超时
+    thread = threading.Thread(target=execute_batch_async)
+    thread.daemon = True
+    thread.start()
+
     return jsonify({
         'success': True,
-        'message': f'批量执行完成，成功: {len(results["success"])}，跳过: {len(results["skipped"])}，失败: {len(results["failed"])}',
-        'results': results
+        'message': f'批量执行已开始，共 {queued_count} 个任务',
+        'total': queued_count,
+        'task_orders': [t.get('order') for t in selected_tasks if t.get('order')]
     })
 
 @app.route('/api/categories', methods=['GET'])

@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    title="任务执行监控"
+    :title="readOnly ? '任务日志' : '任务执行监控'"
     width="800px"
     :before-close="handleClose"
     :close-on-click-modal="false"
@@ -120,7 +120,7 @@
     <template #footer>
       <div class="dialog-footer">
         <el-button
-          v-if="isRunning"
+          v-if="isRunning && !readOnly"
           type="warning"
           @click="handleCancel"
           :loading="cancelling"
@@ -128,7 +128,7 @@
           取消执行
         </el-button>
         <el-button @click="handleClose">
-          {{ isRunning ? '最小化' : '关闭' }}
+          {{ isRunning && !readOnly ? '最小化' : '关闭' }}
         </el-button>
       </div>
     </template>
@@ -148,6 +148,8 @@ interface Props {
   modelValue: boolean
   task: Task | null
   taskId: number
+  /** 只读模式：仅查看该任务的历史日志，不建立实时监控、不做自动执行相关交互 */
+  readOnly?: boolean
 }
 
 interface Emits {
@@ -158,6 +160,8 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+
+const readOnly = computed(() => props.readOnly === true)
 
 const visible = computed({
   get: () => props.modelValue,
@@ -567,6 +571,19 @@ const startMonitoring = () => {
   logs.value = []
   transferredFiles.value = []
   elapsedTime.value = '00:00'
+
+  // 只读模式（查看单个任务的历史日志）：不建流、不计时、不弹完成提示
+  if (readOnly.value) {
+    currentStatus.value = props.task.status || 'normal'
+    currentMessage.value = props.task.message || ''
+    transferredFiles.value = props.task.transferred_files || []
+    // 展示最近一次执行时间（后端已记录时）
+    const lastExecute = props.task.last_execute_time
+    startTime.value = lastExecute ? new Date(lastExecute * 1000).toLocaleString() : ''
+    void refreshLogs({ showLoading: true })
+    return
+  }
+
   currentStatus.value = 'running'
   currentMessage.value = '任务正在执行中...'
 

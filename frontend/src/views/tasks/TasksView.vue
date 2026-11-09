@@ -205,6 +205,10 @@
                 <el-icon><Share /></el-icon>
               </el-button>
               
+              <el-button @click="viewTaskLogs(row)">
+                <el-icon><Document /></el-icon>
+              </el-button>
+              
               <el-button 
                 type="danger" 
                 @click="deleteTask(row.order - 1)"
@@ -319,6 +323,14 @@
             </button>
             
             <button 
+              class="action-btn"
+              @click="viewTaskLogs(task)"
+              title="查看日志"
+            >
+              <el-icon><Document /></el-icon>
+            </button>
+            
+            <button 
               class="action-btn action-btn-danger"
               @click="deleteTask(task.order - 1)"
               title="删除任务"
@@ -338,11 +350,12 @@
       @update:modelValue="handleDialogClose"
     />
 
-    <!-- 任务运行窗口 -->
+    <!-- 任务运行窗口 / 日志查看窗口 -->
     <TaskRunnerDialog
       v-model="showTaskRunner"
       :task="runningTask"
       :task-id="runningTaskId"
+      :read-only="taskRunnerReadOnly"
       @task-completed="handleTaskCompleted"
       @task-cancelled="handleTaskCancelled"
       @update:modelValue="handleTaskRunnerClose"
@@ -377,7 +390,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { 
   Plus, Search, VideoPlay, Delete, Edit, Share, 
-  Link, CopyDocument, DCaret, Sort, Setting
+  Link, CopyDocument, DCaret, Sort, Setting, Document
 } from '@element-plus/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useTaskStore } from '@/stores/tasks'
@@ -436,6 +449,8 @@ const editingTask = ref<Task | null>(null)
 const showTaskRunner = ref(false)
 const runningTask = ref<Task | null>(null)
 const runningTaskId = ref(-1)
+// 是否为只读日志模式（仅查看历史日志，不触发执行）
+const taskRunnerReadOnly = ref(false)
 
 // 拖拽状态
 const isDragging = ref(false)
@@ -541,12 +556,21 @@ const executeTask = async (taskId: number) => {
   // 设置运行窗口数据并显示
   runningTask.value = task
   runningTaskId.value = taskId
+  taskRunnerReadOnly.value = false
   showTaskRunner.value = true
   
   // 执行任务（不等待完成）
   executeTaskWithPolling(taskId).catch((error) => {
     console.error('任务执行失败:', error)
   })
+}
+
+// 只读查看单个任务的历史日志（不触发执行）
+const viewTaskLogs = (task: Task) => {
+  runningTask.value = task
+  runningTaskId.value = task.order - 1
+  taskRunnerReadOnly.value = true
+  showTaskRunner.value = true
 }
 
 const executeBatchTasks = async () => {
@@ -633,6 +657,7 @@ const handleTaskRunnerClose = () => {
   // 清理运行窗口状态
   runningTask.value = null
   runningTaskId.value = -1
+  taskRunnerReadOnly.value = false
 }
 
 // 拖拽功能
