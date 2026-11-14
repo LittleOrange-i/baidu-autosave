@@ -39,16 +39,21 @@ start.bat
 ./start.sh
 ```
 
-启动后访问：http://localhost:3000  
+启动后访问：http://localhost:3001  
 API 请求会自动代理到后端的 5656 端口
 
 ### 生产构建
 
 ```bash
+# 仅构建到 dist 目录
 npm run build
+
+# 构建并自动复制到后端使用的 static 目录（在项目根目录也可执行）
+npm run build:static
+# 或：npm --prefix frontend run build:static
 ```
 
-构建文件将输出到 `dist` 目录
+`build:static` 会先清空后端根目录的 `static/`，再复制最新的 `dist/` 内容，避免残留旧哈希文件。
 
 ## 📁 项目结构
 

@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "build:prod": "npx vite build",
+    "build:static": "npm install --no-audit --no-fund && vite build && node -e \"const fs=require('fs');fs.rmSync('../static',{recursive:true,force:true});fs.cpSync('dist','../static',{recursive:true})\"",
     "preview": "vite preview",
     "version:patch": "npm version patch --no-git-tag-version && git add package.json && git commit -m \"chore: bump version to $(jq -r '.version' package.json)\" && git tag \"v$(jq -r '.version' package.json)\" && git push && git push --tags",
     "version:minor": "npm version minor --no-git-tag-version && git add package.json && git commit -m \"chore: bump version to $(jq -r '.version' package.json)\" && git tag \"v$(jq -r '.version' package.json)\" && git push && git push --tags",
